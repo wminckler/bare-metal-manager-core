@@ -273,7 +273,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
     }
 
     let include_bridge = !port_configs.is_empty() && port_configs.iter().all(|b| b.IsL2Segment);
-    
+
     let (
         ingress_ipv4_override_rules,
         egress_ipv4_override_rules,

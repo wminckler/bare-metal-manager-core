@@ -708,7 +708,6 @@ impl MainLoop {
                 let health_report = health::health_check(
                     &self.agent_config.hbn.root_dir,
                     &tenant_peers,
-                    self.started_at,
                     has_changed_configs,
                     conf.min_dpu_functioning_links.unwrap_or(2),
                     &conf.route_servers,

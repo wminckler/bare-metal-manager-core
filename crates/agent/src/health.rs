@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use health_report::HealthProbeId;
 use tokio::process::Command as TokioCommand;
@@ -113,7 +113,6 @@ pub fn is_up(health_report: &health_report::HealthReport) -> bool {
 pub async fn health_check(
     hbn_root: &Path,
     host_routes: &[&str],
-    _process_started_at: Instant,
     has_changed_configs: bool,
     min_healthy_links: u32,
     route_servers: &[String],
@@ -148,7 +147,9 @@ pub async fn health_check(
     if !is_up(&hr) {
         return hr;
     }
-    check_dhcp_server(&mut hr, &container_id, include_dhcp_server).await;
+    if include_dhcp_server {
+        check_dhcp_server(&mut hr, &container_id).await;
+    }
     check_ifreload(&mut hr, &container_id).await;
     let hbn_daemons_file = hbn_root.join(HBN_DAEMONS_FILE);
     bgp::check_daemon_enabled(&mut hr, &hbn_daemons_file.to_string_lossy());
@@ -235,11 +236,7 @@ async fn check_hbn_services_running(
 // Very similar to check_hbn_services_running, except it happens _after_ we start configuring.
 // The other services must be up before we start configuring.
 // Out of relay and dhcp server, only and only one should be up.
-async fn check_dhcp_server(
-    hr: &mut health_report::HealthReport,
-    container_id: &str,
-    include_dhcp_server: bool,
-) {
+async fn check_dhcp_server(hr: &mut health_report::HealthReport, container_id: &str) {
     // `supervisorctl status` has exit code 3 if there are stopped processes (which we expect),
     // so final param is 'false' here.
     // https://github.com/Supervisor/supervisor/issues/1223
@@ -271,16 +268,12 @@ async fn check_dhcp_server(
         }
     };
 
-    let dhcp_server_status = if include_dhcp_server {
-        match st.status_of(DHCP_SERVER_SERVICE) {
-            SctlState::Running => {
-                passed(hr, probe_ids::DhcpServer.clone(), None);
-                None
-            }
-            status => Some(status),
+    let dhcp_server_status = match st.status_of(DHCP_SERVER_SERVICE) {
+        SctlState::Running => {
+            passed(hr, probe_ids::DhcpServer.clone(), None);
+            None
         }
-    } else {
-        None
+        status => Some(status),
     };
 
     if let Some(x) = dhcp_server_status {
