@@ -21,13 +21,14 @@ use std::fs::File;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 use std::{fmt, fs, io};
 
 use ::rpc::InterfaceFunctionType;
 use ::rpc::forge::{
-    self as rpc, FlatInterfaceConfig, NetworkSecurityGroupRuleAction,
-    NetworkSecurityGroupRuleProtocol,
+    self as rpc, FlatInterfaceConfig, ManagedHostNetworkConfigResponse,
+    NetworkSecurityGroupRuleAction, NetworkSecurityGroupRuleProtocol,
 };
 use eyre::WrapErr;
 use forge_network::ip::prefix::Ipv4Net;
@@ -52,6 +53,74 @@ const NVUED_BLOCK_RULE: &str = r"
 # Block access to nvued API
 -A INPUT -p tcp --dport 8765 -j DROP
 ";
+
+#[derive(PartialEq, Debug, Clone)]
+pub enum InterfaceState {
+    Up,
+    Down,
+}
+
+impl FromStr for InterfaceState {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains("DOWN") {
+            return Ok(InterfaceState::Down);
+        }
+        Ok(InterfaceState::Up)
+    }
+
+    type Err = eyre::Report;
+}
+
+impl InterfaceState {
+    const HOST_INTERFACE_NAME: &str = "pf0hpf";
+    pub fn command(&self) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("ip");
+        cmd.arg("link").arg("set").arg(InterfaceState::HOST_INTERFACE_NAME);
+        if InterfaceState::Up == *self {
+            cmd.arg("up");
+        } else {
+            cmd.arg("down");
+        }
+        cmd
+    }
+
+    pub async fn update_state(
+        needed_state: &Self,
+    ) -> eyre::Result<()> {
+        let current_state = get_interface_state(InterfaceState::HOST_INTERFACE_NAME).await?;
+
+        if current_state != *needed_state {
+            // Execute command only if interface state is changed.
+            let mut cmd = needed_state.command();
+            tracing::info!(
+                "Updating interface state from {:?} to {:?} with command: {:?}",
+                current_state,
+                needed_state,
+                cmd
+            );
+            let result = cmd.output().await?;
+            if !result.status.success() {
+                return Err(eyre::eyre!(
+                    "Failed to update interface state: {}",
+                    result.status
+                ));
+            }
+
+            // Let's check if interface state is updated or not.
+            let new_state = get_interface_state(InterfaceState::HOST_INTERFACE_NAME).await?;
+            if &new_state != needed_state {
+                return Err(eyre::eyre!(
+                    r#"State is not updated after command execution. Will try in next iteration. 
+                Needed {needed_state:?}, After updating {new_state:?}, Interface: {}"#,
+                    InterfaceState::HOST_INTERFACE_NAME
+                ));
+            }
+        }
+
+        // Return new state.
+        Ok(())
+    }
+}
 
 struct EthernetVirtualizerPaths {
     interfaces: FPath,
@@ -706,6 +775,43 @@ async fn do_post(
         eyre::bail!(err_message);
     }
     Ok(has_changes)
+}
+
+async fn get_interface_state(interface_name: &str) -> eyre::Result<InterfaceState> {
+    let mut cmd = tokio::process::Command::new("ip");
+    cmd.arg("link").arg("show").arg(interface_name);
+    let output = cmd.output().await?;
+
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to get interface state: {}", output.status));
+    }
+
+    let output = String::from_utf8_lossy(&output.stdout);
+    Ok(InterfaceState::from_str(&output)?)
+}
+
+fn needed_interface_state(is_primary_dpu: bool, use_admin_network: bool) -> InterfaceState {
+    // Interface is always UP on primary DPU.
+    if is_primary_dpu {
+        return InterfaceState::Up;
+    }
+
+    // If secondary DPU and on tenant network, enable the interface.
+    if !use_admin_network {
+        return InterfaceState::Up;
+    }
+
+    // If secondary DPU and on admin network, disable the interface.
+    InterfaceState::Down
+}
+
+pub async fn update_interface_state(
+    nc: &ManagedHostNetworkConfigResponse,
+) -> eyre::Result<()> {
+
+    let needed_state = needed_interface_state(nc.is_primary_dpu, nc.use_admin_network);
+
+    InterfaceState::update_state(&needed_state).await
 }
 
 pub async fn update_dhcp(
@@ -1615,7 +1721,9 @@ mod tests {
     use utils::models::dhcp::{DhcpConfig, HostConfig};
 
     use super::FPath;
-    use crate::ethernet_virtualization::ServiceAddresses;
+    use crate::ethernet_virtualization::{
+        InterfaceState, ServiceAddresses, needed_interface_state,
+    };
     use crate::{HBNDeviceNames, dhcp, nvue};
     #[ctor::ctor]
     fn setup() {
@@ -3158,5 +3266,23 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_cmd_return_val() {
+        // Primary dpu admin network
+        assert_eq!(needed_interface_state(true, true), InterfaceState::Up);
+
+        // Primary dpu tenant network
+        assert_eq!(needed_interface_state(true, false), InterfaceState::Up);
+
+        // Primary dpu admin network
+        assert_eq!(needed_interface_state(true, true), InterfaceState::Up);
+
+        // Secondary dpu admin network
+        assert_eq!(needed_interface_state(false, true), InterfaceState::Down);
+
+        // Secondary dpu tenant network
+        assert_eq!(needed_interface_state(false, false), InterfaceState::Up);
     }
 }

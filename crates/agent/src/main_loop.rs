@@ -686,6 +686,12 @@ impl MainLoop {
                             status_out.network_config_error = Some(err.to_string());
                         }
                     }
+
+                    // In case of secondary DPU, the interface must be disabled if on admin network, else enabled.
+                    // Note that the nvue config handles the blocking of traffic on the interface.  This is only so that the host link reflects the correct state.
+                    if let Err(err) = ethernet_virtualization::update_interface_state(&conf).await {
+                        tracing::error!(error = format!("{err:#}"), "Updating interface state.");
+                    }
                 }
 
                 // Feed the latest instance metadata to FMDS and acknowledge it
