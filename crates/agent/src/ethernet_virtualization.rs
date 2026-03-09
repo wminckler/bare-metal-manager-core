@@ -787,7 +787,7 @@ async fn get_interface_state(interface_name: &str) -> eyre::Result<InterfaceStat
     }
 
     let output = String::from_utf8_lossy(&output.stdout);
-    Ok(InterfaceState::from_str(&output)?)
+    InterfaceState::from_str(&output)
 }
 
 fn needed_interface_state(is_primary_dpu: bool, use_admin_network: bool) -> InterfaceState {
